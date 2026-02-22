@@ -1,0 +1,1202 @@
+{
+  "name": "MathGen V2 — Pipeline Corrigé",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1072,
+        1776
+      ],
+      "id": "3fe2b2d4-cbff-4fdf-af69-4a38b91502a5",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "model": "devstral-latest",
+        "options": {
+          "temperature": 0.2,
+          "topP": 0.9
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatMistralCloud",
+      "typeVersion": 1,
+      "position": [
+        528,
+        2336
+      ],
+      "id": "c64c0d29-dc14-47e1-8487-687aabeec9ce",
+      "name": "Mistral Cloud Chat Model2",
+      "credentials": {
+        "mistralCloudApi": {
+          "id": "cHIrVYtsatxc3LYZ",
+          "name": "Mistral Cloud account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// STATE — Initialisation du state MathGen\n// Reçoit maintenant DB_Graphes (harmonisé) + Candidat\n// =====================================================\n\nconst inputs = $input.all();\n\n// DB_Graphes retourne { graphDatabase: [...] }\nconst dbItem       = inputs.find(i => i.json.graphDatabase);\nconst graphDatabase = dbItem?.json?.graphDatabase || [];\n\n// On initialise le state avec grade par défaut\n// (Curriculum JSON prendra grade/trimester depuis Candidat)\nreturn {\n  state: {\n    graph:      null,\n    structure:  null,\n    values:     null,\n    computed:   null,\n    semantic:   null,\n    narrative:  null,\n    validation: null,\n    attempts:   0,\n    grade:      \"CM1\"\n  },\n  graphDatabase,\n  graphs: graphDatabase\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -736,
+        1776
+      ],
+      "id": "a4ccf820-f226-46d7-9f7b-7008c1acbe93",
+      "name": "state"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// PARSER — Parse LLM output + injecte next_stage=\"scenario\"\n// next_stage hardcodé ici pour éviter la dépendance au LLM\n// =====================================================\n\nreturn $input.all().map(item => {\n  let rawOutput = item.json.output;\n\n  let cleanJson = rawOutput\n    .replace(/```json/g, '')\n    .replace(/```/g, '')\n    .trim();\n\n  try {\n    const parsedData = JSON.parse(cleanJson);\n\n    // Injection du next_stage — ne pas laisser le LLM décider\n    return {\n      json: {\n        ...parsedData,\n        next_stage: 'scenario'\n      }\n    };\n  } catch (error) {\n    // En cas d'erreur de parsing, on force quand même l'avancement\n    return {\n      json: {\n        state_update: {},\n        next_stage: 'scenario',\n        parse_error: 'Échec parsing JSON: ' + error.message,\n        original: rawOutput\n      }\n    };\n  }\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1056,
+        2176
+      ],
+      "id": "c9954a98-13f6-4648-8ab4-a8ed7d5bd50d",
+      "name": "parser"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// CLEAN GRAPHS — Nettoyage et transmission\n// =====================================================\n\nconst rawGraphDatabase = $json.graphDatabase || [];\n\nreturn {\n  state: $json.state,\n  graphs: rawGraphDatabase,\n  graphDatabase: rawGraphDatabase\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -576,
+        1776
+      ],
+      "id": "dbef2248-5648-4ea5-92dc-4443fde25faa",
+      "name": "clean graphs"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Current state:\n\n{\n  \"structure\": {{ JSON.stringify($json.state.structure, null, 2) }},\n  \"values\": {{ JSON.stringify($json.state.values, null, 2) }},\n  \"grade\": \"{{ $json.state.grade }}\"\n}\n\nRules:\n- Assign a realistic meaning to each variable.\n- No narrative text.\n- No computation.\n- No new variables.\n- Output strict JSON only.\n",
+        "options": {
+          "systemMessage": "You are a Semantic Mapping Agent.\n\nYou assign real-world meaning to variables.\n\nYou do NOT:\n- Modify numbers\n- Compute anything\n- Write narrative text\n- Change equations\n\nReturn STRICT JSON:\n\n{\n  \"state_update\": {\n    \"semantic\": {...}\n  },\n }\n\n"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        656,
+        2176
+      ],
+      "id": "3ea51c0e-1545-4e2a-b647-daa9065e01b4",
+      "name": "Semantic Agent"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Current state:\n\n{\n  \"structure\": {{ JSON.stringify($json.state.structure, null, 2) }},\n  \"values\": {{ JSON.stringify($json.state.values, null, 2) }},\n  \"semantic\": {{ JSON.stringify($json.state.semantic, null, 2) }},\n\"recommended_context\": \"{{ $json.state.recommended_context || 'general' }}\",\n\"context_suggestions\": {{ JSON.stringify($json.state.context_suggestions, null, 2) }}\n  \"grade\": \"{{ $json.state.grade }}\"\n}\n\nRules:\n- Use the recommended_context theme to frame the scenario\n- One phase per equation.\n- No computation.\n- No narrative sentences.\n- No variable names.\n- Output strict JSON only.\n",
+        "options": {
+          "systemMessage": "You are a Scenario Planning Agent.\n\nYour role:\n- Transform semantic roles into a logical structured flow.\n- USE THE RECOMMENDED_CONTEXT theme throughout the scenario\n- Ensure context consistency with the suggested theme\n- Align strictly with structure equations.\n- Do NOT compute anything.\n- Do NOT write full narrative sentences.\n- Do NOT invent new roles.\n\nReturn STRICT JSON:\n\n{\n  \"state_update\": {\n    \"scenario_plan\": {\n      \"context_theme\": \"the recommended_context being used\",\n      \"initial_context\": \"short structured description\",\n      \"steps\": [\n        {\n          \"phase\": \"description\",\n          \"linked_equation\": \"equation_string\"\n        }\n      ],\n      \"final_question_focus\": \"what must be determined\"\n    }\n  }\n}"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        704,
+        2368
+      ],
+      "id": "b655cc0f-904e-4094-931f-f7da57caa1fe",
+      "name": "Scenario Planner"
+    },
+    {
+      "parameters": {
+        "model": "devstral-latest",
+        "options": {
+          "temperature": 0.2,
+          "topP": 0.9
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatMistralCloud",
+      "typeVersion": 1,
+      "position": [
+        736,
+        2560
+      ],
+      "id": "3f06ed05-1649-46da-8a31-76f88ba36907",
+      "name": "Mistral Cloud Chat Model",
+      "credentials": {
+        "mistralCloudApi": {
+          "id": "cHIrVYtsatxc3LYZ",
+          "name": "Mistral Cloud account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Current state:\n\n{\n  \"values\": {{ JSON.stringify($json.state.values, null, 2) }},\n  \"semantic\": {{ JSON.stringify($json.state.semantic, null, 2) }},\n  \"scenario_plan\": {{ JSON.stringify($json.state.scenario_plan, null, 2) }},\n  \"grade\": \"{{ $json.state.grade }}\"\n}\n\nCritical rule:\nEach numeric value must appear exactly once.\nNo extra numbers allowed.\nOutput strict JSON only.\n",
+        "options": {
+          "systemMessage": "You are a controlled Arabic math problem writer.\n\nYou must:\n- Follow scenario_plan strictly.\n- Use ALL numbers exactly once.\n- Not compute anything.\n- Not show equations.\n- Not mention variable names.\n\nReturn STRICT JSON:\n{\n\"state_update\": \n\n{\n  \"narrative\": \"Arabic problem text\"\n}\n}"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        720,
+        2576
+      ],
+      "id": "e7c5ac2d-c7bd-4551-8975-de2196820dad",
+      "name": "Arabic Writer"
+    },
+    {
+      "parameters": {
+        "model": "devstral-latest",
+        "options": {
+          "temperature": 0.5,
+          "topP": 0.9
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatMistralCloud",
+      "typeVersion": 1,
+      "position": [
+        720,
+        2720
+      ],
+      "id": "565daddf-837a-47ba-9429-f86516341716",
+      "name": "Mistral Cloud Chat Model1",
+      "credentials": {
+        "mistralCloudApi": {
+          "id": "cHIrVYtsatxc3LYZ",
+          "name": "Mistral Cloud account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const currentState = $input.first().json.state;\n\nreturn {\n  state: {\n    ...currentState,\n    meta: {\n      stage: \"semantic\",\n      attempts: 0,\n      status: \"running\"\n    }\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        944,
+        1776
+      ],
+      "id": "74861d90-eccd-4d2d-acfa-baea908c248b",
+      "name": "State Engine"
+    },
+    {
+      "parameters": {
+        "jsCode": "const previousState = $('Dispatcher').first().json.state\nconst input = $input.first().json;\n\nfunction deepMerge(target, source) {\n  if (!source) return target;\n\n  const output = { ...target };\n\n  Object.keys(source).forEach(key => {\n    if (\n      source[key] &&\n      typeof source[key] === 'object' &&\n      !Array.isArray(source[key]) &&\n      target[key]\n    ) {\n      output[key] = deepMerge(target[key], source[key]);\n    } else {\n      output[key] = source[key];\n    }\n  });\n\n  return output;\n}\n\nconst mergedState = deepMerge(previousState, input.state_update || {});\n\nreturn {\n  state: {\n    ...mergedState,\n    meta: {\n      ...mergedState.meta,\n      stage: input.next_stage || mergedState.meta.stage\n    }\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1248,
+        2176
+      ],
+      "id": "277ce552-fe0b-41cb-8afd-037406136d10",
+      "name": "Merge Update"
+    },
+    {
+      "parameters": {
+        "jsCode": "const previousState = $('Dispatcher').first().json.state\nconst input = $input.first().json;\n\nfunction deepMerge(target, source) {\n  if (!source) return target;\n\n  const output = { ...target };\n\n  Object.keys(source).forEach(key => {\n    if (\n      source[key] &&\n      typeof source[key] === 'object' &&\n      !Array.isArray(source[key]) &&\n      target[key]\n    ) {\n      output[key] = deepMerge(target[key], source[key]);\n    } else {\n      output[key] = source[key];\n    }\n  });\n\n  return output;\n}\n\nconst mergedState = deepMerge(previousState, input.state_update || {});\n\nreturn {\n  state: {\n    ...mergedState,\n    meta: {\n      ...mergedState.meta,\n      stage: input.next_stage || mergedState.meta.stage\n    }\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1264,
+        2368
+      ],
+      "id": "067ee90e-7e87-4c0a-afb6-252f2c24095d",
+      "name": "Merge Update1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// PARSER — Parse LLM output + injecte next_stage=\"narrative\"\n// next_stage hardcodé ici pour éviter la dépendance au LLM\n// =====================================================\n\nreturn $input.all().map(item => {\n  let rawOutput = item.json.output;\n\n  let cleanJson = rawOutput\n    .replace(/```json/g, '')\n    .replace(/```/g, '')\n    .trim();\n\n  try {\n    const parsedData = JSON.parse(cleanJson);\n\n    // Injection du next_stage — ne pas laisser le LLM décider\n    return {\n      json: {\n        ...parsedData,\n        next_stage: 'narrative'\n      }\n    };\n  } catch (error) {\n    // En cas d'erreur de parsing, on force quand même l'avancement\n    return {\n      json: {\n        state_update: {},\n        next_stage: 'narrative',\n        parse_error: 'Échec parsing JSON: ' + error.message,\n        original: rawOutput\n      }\n    };\n  }\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1072,
+        2368
+      ],
+      "id": "3606270b-bdf0-4347-bf46-50556969f4a7",
+      "name": "parser1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// PARSER — Parse LLM output + injecte next_stage=\"audit\"\n// next_stage hardcodé ici pour éviter la dépendance au LLM\n// =====================================================\n\nreturn $input.all().map(item => {\n  let rawOutput = item.json.output;\n\n  let cleanJson = rawOutput\n    .replace(/```json/g, '')\n    .replace(/```/g, '')\n    .trim();\n\n  try {\n    const parsedData = JSON.parse(cleanJson);\n\n    // Injection du next_stage — ne pas laisser le LLM décider\n    return {\n      json: {\n        ...parsedData,\n        next_stage: 'audit'\n      }\n    };\n  } catch (error) {\n    // En cas d'erreur de parsing, on force quand même l'avancement\n    return {\n      json: {\n        state_update: {},\n        next_stage: 'audit',\n        parse_error: 'Échec parsing JSON: ' + error.message,\n        original: rawOutput\n      }\n    };\n  }\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1056,
+        2576
+      ],
+      "id": "b09b54cf-951f-4b5d-a78a-695e6ebb7e56",
+      "name": "parser2"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// MERGE UPDATE 2 — Fusion state après Arabic Writer\n// Uniformisé : lit next_stage depuis parser2\n// =====================================================\n\nconst previousState = $('Dispatcher').first().json.state;\nconst input = $input.first().json;\n\nfunction deepMerge(target, source) {\n  if (!source) return target;\n  const output = { ...target };\n  Object.keys(source).forEach(key => {\n    if (source[key] && typeof source[key] === 'object' &&\n        !Array.isArray(source[key]) && target[key]) {\n      output[key] = deepMerge(target[key], source[key]);\n    } else {\n      output[key] = source[key];\n    }\n  });\n  return output;\n}\n\nconst mergedState = deepMerge(previousState, input.state_update || {});\n\nreturn {\n  state: {\n    ...mergedState,\n    meta: {\n      ...mergedState.meta,\n      stage: input.next_stage || mergedState.meta?.stage\n    }\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1264,
+        2576
+      ],
+      "id": "81aae7d7-3223-4c9c-8e30-915de52b88c2",
+      "name": "Merge Update2"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Current state:\n\n{  \"structure\": {{ JSON.stringify($json.state.structure, null, 2) }},\n   \"values\": {{ JSON.stringify($json.state.values, null, 2) }},\n   \"computed\": {{ JSON.stringify($json.state.computed, null, 2) }},\n  \"semantic\": {{ JSON.stringify($json.state.semantic, null, 2) }},\n  \"scenario_plan\": {{ JSON.stringify($json.state.scenario_plan, null, 2) }},\n  \"narrative\": {{ JSON.stringify($json.state.narrative, null, 2) }},\n  \"grade\": \"{{ $json.state.grade }}\"\n}\n\nValidate the narrative strictly according to the system rules.\nReturn strict JSON only.\n",
+        "options": {
+          "systemMessage": "You are a Mathematical Narrative Validation Agent in a structured multi-agent system.\n\nYour role:\n- Analyze the mathematical word problem strictly.\n- Validate logical and numerical consistency.\n- Detect structural errors.\n- Do NOT rewrite or modify the text.\n\nYou MUST NOT:\n- Compute new results.\n- Correct the narrative.\n- Add explanations.\n- Add numbers.\n- Remove numbers.\n- Modify structure.\n\nYou must return STRICT JSON only.\n\nOutput format:\n\n{\n  \"state_update\": {\n    \"narrative_validation\": {\n      \"valid\": true_or_false,\n      \"issues\": [\n        \"string describing issue\"\n      ]\n    }\n  }\n}\n\nRules:\n- Every numeric value must appear exactly once.\n- No extra numbers are allowed.\n- Narrative must align with structure equations.\n- Final question must target the correct objective.\n- No computed result should appear inside the narrative.\n- The problem must be solvable.\n\nIf no issues are found:\n\"valid\": true\nand \"issues\": []\n"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        864,
+        2816
+      ],
+      "id": "e30cbdc5-5d6b-4ad4-883a-b0b32d88933a",
+      "name": "Audit"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// PARSER — Parse LLM output + injecte next_stage=\"explanation\"\n// next_stage hardcodé ici pour éviter la dépendance au LLM\n// =====================================================\n\nreturn $input.all().map(item => {\n  let rawOutput = item.json.output;\n\n  let cleanJson = rawOutput\n    .replace(/```json/g, '')\n    .replace(/```/g, '')\n    .trim();\n\n  try {\n    const parsedData = JSON.parse(cleanJson);\n\n    // Injection du next_stage — ne pas laisser le LLM décider\n    return {\n      json: {\n        ...parsedData,\n        next_stage: 'explanation'\n      }\n    };\n  } catch (error) {\n    // En cas d'erreur de parsing, on force quand même l'avancement\n    return {\n      json: {\n        state_update: {},\n        next_stage: 'explanation',\n        parse_error: 'Échec parsing JSON: ' + error.message,\n        original: rawOutput\n      }\n    };\n  }\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        2816
+      ],
+      "id": "2cf1c79c-4d1f-4a71-b282-af102547334f",
+      "name": "parser3"
+    },
+    {
+      "parameters": {
+        "model": "devstral-latest",
+        "options": {
+          "temperature": 0.2,
+          "topP": 0.9
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatMistralCloud",
+      "typeVersion": 1,
+      "position": [
+        864,
+        2992
+      ],
+      "id": "3290b0d1-f05c-4e5f-8204-4142ad90c5e4",
+      "name": "Mistral Cloud Chat Model3",
+      "credentials": {
+        "mistralCloudApi": {
+          "id": "cHIrVYtsatxc3LYZ",
+          "name": "Mistral Cloud account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": "devstral-latest",
+        "options": {
+          "temperature": 0.2,
+          "topP": 0.9
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatMistralCloud",
+      "typeVersion": 1,
+      "position": [
+        1040,
+        3232
+      ],
+      "id": "04fa8ed6-77cd-43de-84d0-ace60df66a7b",
+      "name": "Mistral Cloud Chat Model4",
+      "credentials": {
+        "mistralCloudApi": {
+          "id": "cHIrVYtsatxc3LYZ",
+          "name": "Mistral Cloud account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// PARSER — Parse LLM output + injecte next_stage=\"done\"\n// next_stage hardcodé ici pour éviter la dépendance au LLM\n// =====================================================\n\nreturn $input.all().map(item => {\n  let rawOutput = item.json.output;\n\n  let cleanJson = rawOutput\n    .replace(/```json/g, '')\n    .replace(/```/g, '')\n    .trim();\n\n  try {\n    const parsedData = JSON.parse(cleanJson);\n\n    // Injection du next_stage — ne pas laisser le LLM décider\n    return {\n      json: {\n        ...parsedData,\n        next_stage: 'done'\n      }\n    };\n  } catch (error) {\n    // En cas d'erreur de parsing, on force quand même l'avancement\n    return {\n      json: {\n        state_update: {},\n        next_stage: 'done',\n        parse_error: 'Échec parsing JSON: ' + error.message,\n        original: rawOutput\n      }\n    };\n  }\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1392,
+        3072
+      ],
+      "id": "d892a506-79d7-41f5-b7a0-9a48fc4ed5a3",
+      "name": "parser4"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// AUDIT NODE — Fusion state après Audit\n// =====================================================\n\nconst previousState = $('Dispatcher').first().json.state;\nconst input = $input.first().json;\n\nfunction deepMerge(target, source) {\n  if (!source) return target;\n  const output = { ...target };\n  Object.keys(source).forEach(key => {\n    if (source[key] && typeof source[key] === 'object' &&\n        !Array.isArray(source[key]) && target[key]) {\n      output[key] = deepMerge(target[key], source[key]);\n    } else {\n      output[key] = source[key];\n    }\n  });\n  return output;\n}\n\nconst mergedState = deepMerge(previousState, input.state_update || {});\n\nreturn {\n  state: {\n    ...mergedState,\n    meta: {\n      ...mergedState.meta,\n      stage: input.next_stage || mergedState.meta?.stage\n    }\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1392,
+        2816
+      ],
+      "id": "42102b17-320b-4f70-bbce-ac48c4b9386c",
+      "name": "Audit Node"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Current state:\n\n{\n  \"structure\": {{ JSON.stringify($json.state.structure, null, 2) }},\n  \"values\": {{ JSON.stringify($json.state.values, null, 2) }},\n  \"computed\": {{ JSON.stringify($json.state.computed, null, 2) }},\n  \"grade\": \"{{ $json.state.grade }}\"\n}\n\nRules:\n- One solution step per equation.\n- Follow equation order strictly.\n- Ensure consistency with computed values.\n- Provide all explanations in Arabic.\n- Return strict JSON only.\n",
+        "options": {
+          "systemMessage": "You are a Pedagogical Mathematical Explanation Agent in a structured multi-agent system.\n\nYour role:\n- Generate the full mathematical solution.\n- Follow the structure equations strictly.\n- Show substitutions clearly.\n- Provide the final numeric answer.\n- Provide a short pedagogical explanation.\n- Identify competencies.\n\nIMPORTANT:\n- All explanatory text MUST be written in Arabic.\n- Mathematical expressions can remain symbolic.\n- Do NOT modify numbers.\n- Do NOT invent new steps.\n- Do NOT change structure.\n- Follow equation order strictly.\n- Use only provided values.\n\nYou must return STRICT JSON only.\n\nOutput format:\n\n{\n  \"state_update\": {\n    \"solution\": {\n      \"steps\": [\n        {\n          \"equation\": \"equation_string\",\n          \"substitution\": \"equation_with_numbers\",\n          \"result\": number\n        }\n      ],\n      \"final_answer\": number,\n      \"explanation_ar\": \"شرح تربوي قصير باللغة العربية\"\n    },\n    \"competency\": {\n      \"main_skill_ar\": \"المهارة الرئيسية\",\n      \"secondary_skills_ar\": [\n        \"مهارة فرعية\"\n      ],\n      \"cognitive_level_ar\": \"مستوى معرفي\"\n    }\n  },\n  \"next_stage\": \"done\"\n}\n"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1072,
+        3072
+      ],
+      "id": "2f15ac7a-2b8c-4864-a102-df3c6fa65391",
+      "name": "Explanation"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// EXPLANATION NODE — Fusion state après Explanation\n// =====================================================\n\nconst previousState = $('Dispatcher').first().json.state;\nconst input = $input.first().json;\n\nfunction deepMerge(target, source) {\n  if (!source) return target;\n  const output = { ...target };\n  Object.keys(source).forEach(key => {\n    if (source[key] && typeof source[key] === 'object' &&\n        !Array.isArray(source[key]) && target[key]) {\n      output[key] = deepMerge(target[key], source[key]);\n    } else {\n      output[key] = source[key];\n    }\n  });\n  return output;\n}\n\nconst mergedState = deepMerge(previousState, input.state_update || {});\n\nreturn {\n  state: {\n    ...mergedState,\n    meta: {\n      ...mergedState.meta,\n      stage: input.next_stage || mergedState.meta?.stage\n    }\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1616,
+        3072
+      ],
+      "id": "32022134-e85c-4f95-bac7-5a094cb69efc",
+      "name": "Explanation Node"
+    },
+    {
+      "parameters": {
+        "jsCode": "const state = $input.first().json.state;\n\nreturn {\n  result: {\n    narrative: state.narrative,\n    solution: state.solution,\n    competency: state.competency,\n    status: state.meta.status\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        784,
+        3392
+      ],
+      "id": "142198e5-dc79-4bbc-9bf9-e81fc2294323",
+      "name": "Final Output"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{$json.state.meta.stage}}",
+                    "rightValue": "semantic",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "3b19e9cb-7787-415f-bb84-aa4a06dd98df"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "5a418206-27cd-4a57-8c75-b1a3a303b060",
+                    "leftValue": "={{$json.state.meta.stage}}",
+                    "rightValue": "scenario",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "5fa857d4-cc80-4643-b194-c304e7edacf4",
+                    "leftValue": "={{$json.state.meta.stage}}",
+                    "rightValue": "narrative",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "affb71b8-294f-4785-8b23-4c1086541dfd",
+                    "leftValue": "={{$json.state.meta.stage}}",
+                    "rightValue": "audit",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "1bc115f6-451e-4efb-b0fa-5f68b55008eb",
+                    "leftValue": "={{$json.state.meta.stage}}",
+                    "rightValue": "explanation",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "417ef923-9753-4b85-86bd-d4a7454411c3",
+                    "leftValue": "={{$json.state.meta.stage}}",
+                    "rightValue": "done",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals",
+                      "name": "filter.operator.equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        224,
+        2416
+      ],
+      "id": "fd6d8982-8617-4ef4-8d9a-f459d8c3d0da",
+      "name": "Dispatcher"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// DB_Graphes — Base de données harmonisée\n// grade_range conservé pour compatibilité MathGen\n// graph[] = tableau d'équations plat (harmonisé)\n// structure{} = conservé pour compatibilité agents MathGen\n// =====================================================\n\nconst graphDatabase = [\n  {\n    id: \"G1\", category: \"additive\",\n    grade: null, trimester: null,\n    grade_range: [\"CE2\", \"CM1\" ],\n    graph: [\"TARGET = A + B\"],\n    structure: { equations: [\"TARGET = A + B\"], target_variable: \"TARGET\", max_steps: 1 },\n    operations_profile: { contains_addition: true, contains_subtraction: false, contains_multiplication: false, contains_division: false, multi_operation: false },\n    dimension_policy: { type: \"single_dimension\", allowed_dimensions: [\"quantity\",\"money\",\"length\"], rules: [\"addition_requires_same_dimension\"] },\n    semantic_compatibility: [\"school_supplies\",\"farm_stock\",\"library_books\"],\n    pedagogical_profile: { cognitive_level: \"single_step_basic\", focus_skills: [\"addition_of_quantities\"], common_misconceptions: [\"digit_alignment_error\"] }\n  },\n  {\n    id: \"G2\", category: \"multiplicative\",\n    grade: null, trimester: null,\n    grade_range: [\"CE2\", \"CM1\", \"CM2\", \"4AP\", \"5AP\", \"6AP\"],\n    graph: [\"TARGET = A * B\"],\n    structure: { equations: [\"TARGET = A * B\"], target_variable: \"TARGET\", max_steps: 1 },\n    operations_profile: { contains_addition: false, contains_subtraction: false, contains_multiplication: true, contains_division: false, multi_operation: false },\n    dimension_policy: { type: \"functional_relation\", allowed_dimensions: [\"quantity_money\"], rules: [\"quantity_times_unit_price_equals_money\"] },\n    semantic_compatibility: [\"market\",\"fruit_shop\",\"bakery\"],\n    pedagogical_profile: { cognitive_level: \"multiplicative_reasoning\", focus_skills: [\"repeated_addition_to_multiplication\"], common_misconceptions: [\"confusing_addition_and_multiplication\"] }\n  },\n  {\n    id: \"G3\", category: \"conversion\",\n    grade: null, trimester: null,\n    grade_range: [\"CM1\", \"CM2\", \"4AP\", \"5AP\", \"6AP\"],\n    graph: [\"TARGET = A * 1000\"],\n    structure: { equations: [\"TARGET = A * 1000\"], target_variable: \"TARGET\", max_steps: 1 },\n    operations_profile: { contains_addition: false, contains_subtraction: false, contains_multiplication: true, contains_division: false, multi_operation: false },\n    dimension_policy: { type: \"unit_conversion\", allowed_dimensions: [\"length\",\"mass\"], rules: [\"km_to_multiply_1000\",\"kg_to_g_multiply_1000\"] },\n    semantic_compatibility: [\"distance\",\"weight_measurement\"],\n    pedagogical_profile: { cognitive_level: \"unit_scaling\", focus_skills: [\"metric_system_understanding\"], common_misconceptions: [\"wrong_conversion_direction\"] }\n  },\n  {\n    id: \"G4\", category: \"sharing\",\n    grade: null, trimester: null,\n    grade_range: [\"CM1\", \"CM2\", \"4AP\", \"5AP\", \"6AP\"],\n    graph: [\"TARGET = A / B\"],\n    structure: { equations: [\"TARGET = A / B\"], target_variable: \"TARGET\", max_steps: 1 },\n    operations_profile: { contains_addition: false, contains_subtraction: false, contains_multiplication: false, contains_division: true, multi_operation: false },\n    dimension_policy: { type: \"partition\", allowed_dimensions: [\"quantity\"], rules: [\"total_divided_by_number_of_groups\"] },\n    semantic_compatibility: [\"sharing_candies\",\"group_distribution\",\"classroom_activity\"],\n    pedagogical_profile: { cognitive_level: \"fair_sharing\", focus_skills: [\"division_as_partition\"], common_misconceptions: [\"confusing_divisor_and_dividend\"] }\n  },\n  {\n    id: \"G5\", category: \"cost_profit\",\n    grade: null, trimester: null,\n    grade_range: [\"CM1\", \"CM2\", \"4AP\", \"5AP\", \"6AP\"],\n    graph: [\"S1 = A * B\", \"S2 = C + D\", \"TARGET = S1 - S2\"],\n    structure: { equations: [\"S1 = A * B\", \"S2 = C + D\", \"TARGET = S1 - S2\"], target_variable: \"TARGET\", max_steps: 3 },\n    operations_profile: { contains_addition: true, contains_subtraction: true, contains_multiplication: true, contains_division: false, multi_operation: true },\n    dimension_policy: { type: \"single_dimension_money\", allowed_dimensions: [\"money\"], rules: [\"quantity_times_unit_price_equals_money\",\"addition_same_dimension\",\"subtraction_same_dimension\"] },\n    semantic_compatibility: [\"market\",\"farm_sales\",\"school_event\"],\n    pedagogical_profile: { cognitive_level: \"multi_step_structured\", focus_skills: [\"intermediate_total_calculation\",\"profit_computation\"], common_misconceptions: [\"subtracting_before_completing_totals\",\"mixing_units\"] }\n  }\n];\n\nreturn [{ json: { graphDatabase } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -896,
+        1776
+      ],
+      "id": "8bb66197-2d10-4934-98e0-28129643e9cc",
+      "name": "DB_Graphes"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// CURRICULUM JSON — Référentiel pédagogique tunisien\n// FIX: graphDatabase lu depuis DB_Graphes directement\n//      car Candidat (Set node) écrase le flux et perd graphDatabase\n// =====================================================\n\n// Candidat fournit grade/trimester/operations\nconst grade         = $input.first().json.constraints?.grade              || 'CM1';\nconst trimester     = $input.first().json.constraints?.trimester          || 'T3';\nconst operations    = $input.first().json.constraints?.allowed_operations || ['addition'];\n\n// FIX: graphDatabase récupéré depuis le nœud DB_Graphes par référence directe\nconst graphDatabase = $('DB_Graphes').first().json.graphDatabase || [];\n\nreturn [{ json: {\n  grade,\n  trimester,\n  operation: operations,\n    graphDatabase,\n  curriculum: {\n    meta: { type: 'numerical_constraints', curriculum: 'tunisia_primary', version: '1.2' },\n    global_rules: {\n      natural_numbers_only: true,\n      allow_negative: false,\n      allow_fraction: false,\n      allow_decimal: false,\n      results_must_be_integer: true\n    },\n    base_units: { length: 'mm', mass: 'g', capacity: 'cl', money: 'millime', time: 'minute' },\n    units_catalog: {\n      length: ['mm','cm','m','km'], mass: ['g','kg'],\n      capacity: ['cl','l'], time: ['minute','hour','day'], money: ['millime','dinar']\n    },\n    constraints: {\n      CE2: {\n        T1: {\n          addition:       { allowed: true,  operands_range: { min:0, max:99  }, result_range: { min:0, max:99  } },\n          subtraction:    { allowed: true,  minuend_range:  { min:0, max:99  }, subtrahend_range: { min:0, max:99 }, result_range: { min:0, max:99 }, with_borrow: false },\n          multiplication: { allowed: false },\n          division:       { allowed: false }\n        },\n        T2: {\n          addition:       { allowed: true,  operands_range: { min:0, max:99  }, result_range: { min:0, max:99  } },\n          subtraction:    { allowed: true,  minuend_range:  { min:0, max:99  }, subtrahend_range: { min:0, max:99 }, result_range: { min:0, max:99 }, with_borrow: true },\n          multiplication: { allowed: false },\n          division:       { allowed: false }\n        },\n        T3: {\n          addition:       { allowed: true,  operands_range: { min:0, max:99  }, result_range: { min:0, max:99  } },\n          subtraction:    { allowed: true,  minuend_range:  { min:0, max:99  }, subtrahend_range: { min:0, max:99 }, result_range: { min:0, max:99 }, with_borrow: true },\n          multiplication: { allowed: true,  multiplicand_range: { min:0, max:99 }, multiplier_digit_count: [1], result_range: { min:0, max:999 } },\n          division:       { allowed: false }\n        }\n      },\n      CM1: {\n        T1: {\n          addition:       { allowed: true,  operands_range: { min:0, max:999  }, result_range: { min:0, max:9999 } },\n          subtraction:    { allowed: true,  minuend_range:  { min:0, max:999  }, subtrahend_range: { min:0, max:999  }, result_range: { min:0, max:999  }, with_borrow: false },\n          multiplication: { allowed: true,  multiplicand_range: { min:0, max:999  }, multiplier_digit_count: [1], result_range: { min:0, max:9999 } },\n          division:       { allowed: false }\n        },\n        T2: {\n          addition:       { allowed: true,  operands_range: { min:0, max:9999 }, result_range: { min:0, max:9999 } },\n          subtraction:    { allowed: true,  minuend_range:  { min:0, max:9999 }, subtrahend_range: { min:0, max:9999 }, result_range: { min:0, max:9999 }, with_borrow: true },\n          multiplication: { allowed: true,  multiplicand_range: { min:0, max:9999 }, multiplier_digit_count: [1], result_range: { min:0, max:9999 } },\n          division:       { allowed: false }\n        },\n        T3: {\n          addition:       { allowed: true,  operands_range: { min:0, max:9999 }, result_range: { min:0, max:9999 } },\n          subtraction:    { allowed: true,  minuend_range:  { min:0, max:9999 }, subtrahend_range: { min:0, max:9999 }, result_range: { min:0, max:9999 }, with_borrow: true },\n          multiplication: { allowed: true,  multiplicand_range: { min:0, max:9999 }, multiplier_digit_count: [1,2], result_range: { min:0, max:9999 } },\n          division:       { allowed: true,  exact_only: true, allow_remainder: false, divisor_digit_count: [1], dividend_range: { min:1, max:9999 }, quotient_range: { min:1, max:999 } }\n        }\n      },\n      '4AP': {\n        T1: {\n          addition:       { allowed: true,  operands_range: { min:0, max:9999 }, result_range: { min:0, max:9999 } },\n          subtraction:    { allowed: true,  minuend_range:  { min:0, max:9999 }, subtrahend_range: { min:0, max:9999 }, result_range: { min:0, max:9999 }, with_borrow: false },\n          multiplication: { allowed: true,  multiplicand_range: { min:0, max:9999 }, multiplier_digit_count: [1], result_range: { min:0, max:9999 } },\n          division:       { allowed: false }\n        },\n        T2: {\n          addition:       { allowed: true,  operands_range: { min:0, max:9999 }, result_range: { min:0, max:9999 } },\n          subtraction:    { allowed: true,  minuend_range:  { min:0, max:9999 }, subtrahend_range: { min:0, max:9999 }, result_range: { min:0, max:9999 }, with_borrow: true },\n          multiplication: { allowed: true,  multiplicand_range: { min:0, max:9999 }, multiplier_digit_count: [1], result_range: { min:0, max:9999 } },\n          division:       { allowed: false }\n        },\n        T3: {\n          addition:       { allowed: true,  operands_range: { min:0, max:9999 }, result_range: { min:0, max:9999 } },\n          subtraction:    { allowed: true,  minuend_range:  { min:0, max:9999 }, subtrahend_range: { min:0, max:9999 }, result_range: { min:0, max:9999 }, with_borrow: true },\n          multiplication: { allowed: true,  multiplicand_range: { min:0, max:9999 }, multiplier_digit_count: [1,2], result_range: { min:0, max:9999 } },\n          division:       { allowed: true,  exact_only: true, allow_remainder: false, divisor_digit_count: [1], dividend_range: { min:1, max:9999 }, quotient_range: { min:1, max:999 } },\n          money:    { allowed: true, prices_multiple_of: 50, allowed_operations: ['sum_money','subtract_money'], no_change: true, no_conversion: true },\n          length:   { allowed: true, units: ['cm','m'], conversion_allowed: false },\n          mass:     { allowed: true, units: ['kg'],      conversion_allowed: false },\n          capacity: { allowed: true, units: ['l'],       conversion_allowed: false },\n          time:     { allowed: true, units: ['hour'],    conversion_allowed: false }\n        }\n      }\n    }\n  }\n}}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        1776
+      ],
+      "id": "e87cfeba-7f15-4380-8273-21dd579b2ef7",
+      "name": "Curriculum JSON"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// GET CONSTRAINTS \n// =====================================================\n\nconst curriculum    = $json.curriculum;\nconst graphDatabase = $json.graphDatabase || [];\n\nfunction getConstraints(grade, trimester, operation) {\n  if (!curriculum?.constraints?.[grade]?.[trimester]?.[operation])\n    throw new Error(`Operation [${operation}] not allowed for ${grade} ${trimester}`);\n\n  const opBlock = curriculum.constraints[grade][trimester][operation];\n  if (opBlock.allowed !== true)\n    throw new Error(`Operation [${operation}] explicitly forbidden`);\n\n  return opBlock;\n}\n\nconst grade      = $json.grade;\nconst trimester  = $json.trimester;\nconst operations = Array.isArray($json.operation)\n  ? $json.operation\n  : [$json.operation];\n\nconst allRules = {};\nfor (const op of operations) {\n  allRules[op] = getConstraints(grade, trimester, op);\n}\n\nreturn [{\n  json: {\n    context: { grade, trimester, allowed_operations: operations },\n    global_rules: curriculum.global_rules,\n    all_operation_rules: allRules,\n    graphDatabase\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        1776
+      ],
+      "id": "d9defa48-09d1-43f2-819d-de6363fc68a6",
+      "name": "GET CONSTRAINTS"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// SELECTGRAPH — VERSION ANTI-CRASH TOTALE\n// =====================================================\n\n// 1️⃣ Récupération sécurisée du node précédent\nconst previousNode = $input.first();\n\nif (!previousNode || !previousNode.json) {\n  throw new Error(\"GET CONSTRAINTS output is undefined\");\n}\n\nconst constraints = previousNode.json;\n\n// 2️⃣ Vérifications strictes\nif (!constraints.graphDatabase) {\n  throw new Error(\"graphDatabase is missing\");\n}\n\nif (!Array.isArray(constraints.graphDatabase)) {\n  throw new Error(\"graphDatabase is not an array\");\n}\n\nif (!constraints.context?.allowed_operations) {\n  throw new Error(\"allowed_operations missing in context\");\n}\n\nconst graphDB = constraints.graphDatabase;\nconst allowedOps = constraints.context.allowed_operations;\n\n// 3️⃣ Fonction sécurisée\nfunction graphUsesOnlyAllowed(graphLines, allowedOps) {\n\n  if (!Array.isArray(graphLines)) return false;\n\n  const opMap = {\n    '+':'addition',\n    '-':'subtraction',\n    '*':'multiplication',\n    '/':'division'\n  };\n\n  for (const line of graphLines) {\n\n    if (!line.includes('=')) return false;\n\n    const right = line.split('=')[1];\n    if (!right) return false;\n\n    const ops = right.match(/[+\\-*/]/g) || [];\n\n    for (const op of ops) {\n      if (!allowedOps.includes(opMap[op])) {\n        return false;\n      }\n    }\n  }\n\n  return true;\n}\n\n// 4️⃣ Filtrage\nconst candidates = graphDB.filter(g =>\n  graphUsesOnlyAllowed(g.graph, allowedOps)\n);\n\nif (!Array.isArray(candidates)) {\n  throw new Error(\"Candidates is not an array\");\n}\n\nif (candidates.length === 0) {\n  throw new Error(\"No compatible graphs found\");\n}\n\n// 5️⃣ Sélection aléatoire sécurisée\nconst selected = candidates[Math.floor(Math.random() * candidates.length)];\n\nreturn [{\n  json: {\n    graph: selected.graph,\n    selectedStructure: selected.structure,\n    all_operation_rules: constraints.all_operation_rules,\n    global_rules: constraints.global_rules,\n    context: constraints.context\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        1776
+      ],
+      "id": "a5a79cb5-00b4-43ab-954c-1d7dcc5e0c54",
+      "name": "SELECTGRAPH"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// INDUSTRIAL BACKWARD CONSTRAINT ENGINE\n// Universal Graph + Curriculum Compliant\n// ============================================================\n\n// -------------------- UTILITIES --------------------\n\nfunction randomInt(min, max) {\n  return Math.floor(Math.random() * (max - min + 1)) + min;\n}\n\nfunction digitCount(n) {\n  return Math.abs(n).toString().length;\n}\n\nfunction tokenize(expr) {\n  return expr.match(/[A-Z]+|\\d+|[\\+\\-\\*\\/\\%\\(\\)]/g);\n}\n\nfunction precedence(op) {\n  if (op === \"+\" || op === \"-\") return 1;\n  if (op === \"*\" || op === \"/\" || op === \"%\") return 2;\n  return 0;\n}\n\nfunction toRPN(tokens) {\n  const output = [];\n  const stack = [];\n\n  for (const token of tokens) {\n    if (/^[A-Z]+$/.test(token) || /^\\d+$/.test(token)) {\n      output.push(token);\n    } else if (\"+-*/%\".includes(token)) {\n      while (\n        stack.length &&\n        precedence(stack[stack.length - 1]) >= precedence(token)\n      ) {\n        output.push(stack.pop());\n      }\n      stack.push(token);\n    } else if (token === \"(\") {\n      stack.push(token);\n    } else if (token === \")\") {\n      while (stack.length && stack[stack.length - 1] !== \"(\") {\n        output.push(stack.pop());\n      }\n      stack.pop();\n    }\n  }\n\n  while (stack.length) output.push(stack.pop());\n  return output;\n}\n\nfunction buildAST(rpn) {\n  const stack = [];\n\n  for (const token of rpn) {\n    if (\"+-*/%\".includes(token)) {\n      const right = stack.pop();\n      const left = stack.pop();\n      stack.push({ type: \"op\", op: token, left, right });\n    } else {\n      stack.push({\n        type: /^[A-Z]+$/.test(token) ? \"var\" : \"const\",\n        value: token\n      });\n    }\n  }\n\n  return stack[0];\n}\n\n// -------------------- BACKTRACK CONTEXT --------------------\n\nclass Context {\n  constructor() {\n    this.values = {};\n    this.stack = [];\n  }\n\n  checkpoint() {\n    this.stack.push(JSON.stringify(this.values));\n  }\n\n  rollback() {\n    this.values = JSON.parse(this.stack.pop());\n  }\n\n  assign(key, value) {\n    if (\n      this.values[key] !== undefined &&\n      this.values[key] !== value\n    ) {\n      throw new Error(\"Conflict on variable \" + key);\n    }\n    this.values[key] = value;\n  }\n}\n\n// -------------------- STRATEGIES --------------------\n\nconst Strategies = {\n\n  \"+\": function(node, desired, ctx, rules) {\n\n    const rule = rules.addition;\n    const range = rule.operands_range;\n\n    for (let a = range.min; a <= range.max; a++) {\n      const b = desired - a;\n      if (b < range.min || b > range.max) continue;\n\n      ctx.checkpoint();\n      try {\n        solveNode(node.left, a, ctx, rules);\n        solveNode(node.right, b, ctx, rules);\n        return;\n      } catch (e) {\n        ctx.rollback();\n      }\n    }\n\n    throw new Error(\"Addition impossible\");\n  },\n\n  \"-\": function(node, desired, ctx, rules) {\n\n    const rule = rules.subtraction;\n    const range = rule.subtrahend_range;\n\n    for (let b = range.min; b <= range.max; b++) {\n      const a = desired + b;\n\n      if (\n        a < rule.minuend_range.min ||\n        a > rule.minuend_range.max\n      ) continue;\n\n      ctx.checkpoint();\n      try {\n        solveNode(node.left, a, ctx, rules);\n        solveNode(node.right, b, ctx, rules);\n        return;\n      } catch (e) {\n        ctx.rollback();\n      }\n    }\n\n    throw new Error(\"Subtraction impossible\");\n  },\n\n  \"*\": function(node, desired, ctx, rules) {\n\n    const rule = rules.multiplication;\n\n    for (\n      let a = rule.multiplicand_range.min;\n      a <= rule.multiplicand_range.max;\n      a++\n    ) {\n\n      if (desired % a !== 0) continue;\n\n      const b = desired / a;\n\n      if (!rule.multiplier_digit_count.includes(digitCount(b)))\n        continue;\n\n      ctx.checkpoint();\n      try {\n        solveNode(node.left, a, ctx, rules);\n        solveNode(node.right, b, ctx, rules);\n        return;\n      } catch (e) {\n        ctx.rollback();\n      }\n    }\n\n    throw new Error(\"Multiplication impossible\");\n  },\n\n  \"/\": function(node, desired, ctx, rules) {\n\n    const rule = rules.division;\n\n    for (let d = rule.divisor_range.min; d <= rule.divisor_range.max; d++) {\n\n      if (!rule.divisor_digit_count.includes(digitCount(d)))\n        continue;\n\n      const dividend = desired * d;\n\n      if (\n        dividend < rule.dividend_range.min ||\n        dividend > rule.dividend_range.max\n      ) continue;\n\n      ctx.checkpoint();\n      try {\n        solveNode(node.left, dividend, ctx, rules);\n        solveNode(node.right, d, ctx, rules);\n        return;\n      } catch (e) {\n        ctx.rollback();\n      }\n    }\n\n    throw new Error(\"Division impossible\");\n  },\n\n  \"%\": function(node, desired, ctx, rules) {\n\n    for (let divisor = 2; divisor <= 20; divisor++) {\n\n      if (desired >= divisor) continue;\n\n      for (let q = 1; q <= 50; q++) {\n\n        const dividend = divisor * q + desired;\n\n        ctx.checkpoint();\n        try {\n          solveNode(node.left, dividend, ctx, rules);\n          solveNode(node.right, divisor, ctx, rules);\n          return;\n        } catch (e) {\n          ctx.rollback();\n        }\n      }\n    }\n\n    throw new Error(\"Remainder impossible\");\n  }\n\n};\n\n// -------------------- NODE SOLVER --------------------\n\nfunction solveNode(node, desiredValue, ctx, rules) {\n\n  if (node.type === \"const\") {\n    if (Number(node.value) !== desiredValue)\n      throw new Error(\"Constant mismatch\");\n    return;\n  }\n\n  if (node.type === \"var\") {\n    ctx.assign(node.value, desiredValue);\n    return;\n  }\n\n  if (!Strategies[node.op])\n    throw new Error(\"Operator not supported: \" + node.op);\n\n  Strategies[node.op](node, desiredValue, ctx, rules);\n}\n\n// -------------------- GLOBAL VALIDATION --------------------\n\nfunction validateGlobal(values, rules, globalRules) {\n\n  if (globalRules?.natural_numbers_only) {\n    for (const v of Object.values(values)) {\n      if (!Number.isInteger(v) || v < 0)\n        throw new Error(\"Global natural number violation\");\n    }\n  }\n\n  // Validate result ranges\n  if (rules.addition?.result_range) {\n    for (const k in values) {\n      if (typeof values[k] !== \"number\") continue;\n    }\n  }\n}\n\n// -------------------- MAIN ENGINE --------------------\n\nfunction solveGraph(graph, rules, globalRules) {\n\n  const ctx = new Context();\n\n  const MAX_ATTEMPTS = 20;\n\n  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {\n\n    ctx.values = {};\n\n    try {\n\n      for (let i = graph.length - 1; i >= 0; i--) {\n\n        const [left, right] = graph[i].split(\"=\");\n\n        const leftVar = left.trim();\n        const expr = right.trim();\n\n        const tokens = tokenize(expr);\n        const rpn = toRPN(tokens);\n        const ast = buildAST(rpn);\n\n        let desired;\n\n        if (i === graph.length - 1) {\n\n          const rule =\n            rules.addition ||\n            rules.subtraction ||\n            rules.multiplication ||\n            rules.division;\n\n          desired = randomInt(\n            rule.result_range.min,\n            rule.result_range.max\n          );\n\n        } else {\n          desired = ctx.values[leftVar];\n        }\n\n        solveNode(ast, desired, ctx, rules);\n        ctx.assign(leftVar, desired);\n      }\n\n      validateGlobal(ctx.values, rules, globalRules);\n\n      return ctx.values;\n\n    } catch (e) {\n      continue;\n    }\n  }\n\n  throw new Error(\"Industrial solver failed after retries\");\n}\n\n// -------------------- EXECUTION --------------------\n\nconst graph = $json.graph;\nconst rules = $json.all_operation_rules;\nconst globalRules = $json.global_rules;\n\nconst values = solveGraph(graph, rules, globalRules);\n\nreturn [{\n  json: {\n    ...$json,\n    values\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        256,
+        1776
+      ],
+      "id": "46f7b700-af79-4492-bd44-6101ad99fd92",
+      "name": "Backward Generator"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst rulesByOp = $json.all_operation_rules || {};\n\nlet activeUnitType = null;\nlet unitConfig     = null;\n\n// On parcourt toutes les opérations actives\nfor (const opName of Object.keys(rulesByOp)) {\n\n  const operationRules = rulesByOp[opName];\n\n  if (!operationRules) continue;\n\n  for (const type of [\"length\",\"mass\",\"capacity\",\"time\"]) {\n\n    if (operationRules?.[type]?.allowed === true) {\n\n      activeUnitType = type;\n      unitConfig     = operationRules[type];\n      break;\n    }\n  }\n\n  if (activeUnitType) break;\n}\n\n// Si aucune unité activée → sortie propre\nif (!activeUnitType) {\n  return [{ json: { ...$json, units_applied: false } }];\n}\n\nreturn [{\n  json: {\n    ...$json,\n    units_applied: true,\n    active_unit_type: activeUnitType,\n    unit_config: unitConfig\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        432,
+        1776
+      ],
+      "id": "b11a61e4-56e7-41e9-a7f6-214e71b7bc6e",
+      "name": "Unit Engine"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// UNIVERSAL VALIDATOR — VERSION ROBUSTE\n// =====================================================\n\nconst { graph, values } = $json;\n\nif (!graph || !values) {\n  throw new Error(\"Missing graph or values\");\n}\n\n// Sécurisation\nfunction safeEvaluate(expr, vals) {\n\n  const variables = Object.keys(vals);\n\n  // Vérifie que toutes les variables de l'expression existent\n  const usedVars = expr.match(/[A-Z][A-Z0-9_]*/g) || [];\n\n  for (const v of usedVars) {\n    if (!(v in vals)) {\n      throw new Error(`Variable ${v} is missing in values`);\n    }\n  }\n\n  return Function(...variables, `return ${expr};`)(...Object.values(vals));\n}\n\nfor (const line of graph) {\n\n  const [left, right] = line.split(\"=\");\n\n  if (!left || !right) {\n    throw new Error(`Invalid equation format: ${line}`);\n  }\n\n  const leftVar = left.trim();\n  const expr    = right.trim();\n\n  if (!(leftVar in values)) {\n    throw new Error(`Missing computed value for ${leftVar}`);\n  }\n\n  const expected = values[leftVar];\n  const computed = safeEvaluate(expr, values);\n\n  if (computed !== expected) {\n    throw new Error(`Mismatch in equation: ${line}`);\n  }\n}\n\nreturn [{\n  json: {\n    ...$json,\n    validated: true\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        1776
+      ],
+      "id": "464b1b26-d0e6-4c2f-a7a4-3055cd03b9d0",
+      "name": "Universal Validator"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// STATE ADAPTER — Pont entre le pipeline corrigé et MathGen\n// Convertit notre format de sortie en state{} MathGen\n// =====================================================\n\nconst data = $json;\n\n// Reconstruct MathGen-compatible computed object from all graph values\nconst computed = { ...data.values };\n\n// Build MathGen state object\nconst state = {\n  // Core numeric data (used by Semantic Agent, Explanation, Audit)\n  graph:     data.selectedStructure || { equations: data.graph, target_variable: \"TARGET\" },\n  structure: data.selectedStructure || { equations: data.graph, target_variable: \"TARGET\", max_steps: data.graph?.length || 1 },\n  values:    Object.fromEntries(\n    Object.entries(data.values || {}).filter(([k]) => k !== \"TARGET\" && !k.startsWith(\"S\"))\n  ),\n  computed:  computed,\n  // Unit info (used by Semantic Agent for context)\n  internal:  data.internal || null,\n  // Curriculum context\n  grade:     data.context?.grade     || \"CM1\",\n  trimester: data.context?.trimester || \"T3\",\n  operation: data.context?.operation || \"addition\",\n  // Validation result\n  validation: {\n    valid:  data.validated === true,\n    score:  data.validated === true ? 100 : 0,\n    issues: []\n  },\n  // Placeholders for downstream agents\n  semantic:  null,\n  narrative: null,\n  solution:  null,\n  attempts:  0,\n    };\n\nreturn [{ json: { state } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        768,
+        1776
+      ],
+      "id": "126f0740-b13c-44ac-83fc-37c709b0f0fc",
+      "name": "State Adapter"
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst graphDatabase = $('DB_Graphes').first().json.graphDatabase || [];\n\nreturn [{ json: {\n  graphDatabase,          // ← on conserve le flux\n  constraints: {\n    grade: \"5AP\",\n    trimester: \"T3\",\n    allowed_operations: [\"addition\", \"multiplication\", \"division\"]\n  }\n}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        1776
+      ],
+      "id": "5d5a9b3a-3e95-4cfe-b925-c70f7c1baac2",
+      "name": "Candidat"
+    },
+    {
+      "parameters": {
+        "model": "devstral-latest",
+        "options": {
+          "temperature": 0.7,
+          "topP": 0.95
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatMistralCloud",
+      "typeVersion": 1,
+      "position": [
+        1424,
+        2320
+      ],
+      "id": "4c0a45da-3c0e-4b69-a7db-45b54434ebe7",
+      "name": "Mistral Cloud Chat Model - Context",
+      "credentials": {
+        "mistralCloudApi": {
+          "id": "cHIrVYtsatxc3LYZ",
+          "name": "Mistral Cloud account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Current state:\n\n{\n  \"structure\": {{ JSON.stringify($json.state.structure, null, 2) }},\n  \"values\": {{ JSON.stringify($json.state.values, null, 2) }},\n  \"semantic\": {{ JSON.stringify($json.state.semantic, null, 2) }},\n  \"grade\": \"{{ $json.state.grade }}\",\n  \"problem_type\": \"{{ $json.state.problem_type || 'general' }}\"\n}\n\nAnalyze the semantic roles and mathematical structure to suggest an engaging real-world context.\n\nRules:\n- Propose a thematic context (shopping, sports, cooking, travel, nature, etc.)\n- Context must be age-appropriate for the grade level\n- Context should match the semantic roles (if quantities involve mass → cooking/market context)\n- Provide 2-3 context suggestions with brief rationale\n- Output strict JSON only\n",
+        "options": {
+          "systemMessage": "You are a Context Suggester Agent for educational math problems.\n\nYour role:\n- Analyze the semantic mapping and problem structure\n- Suggest engaging, age-appropriate real-world contexts\n- Match context to the mathematical operations and semantic roles\n- Consider cultural relevance (Tunisian curriculum)\n\nProblem type detection:\n- If semantic involves mass/weight → cooking, market, postal contexts\n- If semantic involves length/distance → sports, construction, travel contexts\n- If semantic involves money → shopping, savings, budget contexts\n- If semantic involves time → scheduling, travel, cooking contexts\n- If semantic involves capacity/volume → beverages, aquarium, pool contexts\n\nReturn STRICT JSON:\n\n{\n  \"state_update\": {\n    \"context_suggestions\": [\n      {\n        \"theme\": \"market/shopping/sports/cooking/travel/nature/etc\",\n        \"description\": \"brief description of the context\",\n        \"rationale\": \"why this context fits the problem\",\n        \"cultural_fit\": \"how it relates to Tunisian daily life\"\n      }\n    ],\n    \"recommended_context\": \"the best context theme to use\"\n  }\n}\n"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        1408,
+        2176
+      ],
+      "id": "02565f76-039d-402b-8876-ebfde5981e05",
+      "name": "Context Suggester"
+    },
+    {
+      "parameters": {
+        "jsCode": "// =====================================================\n// PARSER CONTEXT — Parse context suggestions output\n// =====================================================\n\nreturn $input.all().map(item => {\n  let rawOutput = item.json.output;\n\n  let cleanJson = rawOutput\n    .replace(/```json/g, '')\n    .replace(/```/g, '')\n    .trim();\n\n  try {\n    const parsedData = JSON.parse(cleanJson);\n\n    return {\n      json: {\n        ...parsedData,\n        next_stage: 'scenario'\n      }\n    };\n  } catch (error) {\n    // En cas d'erreur, on utilise un contexte par défaut\n    return {\n      json: {\n        state_update: {\n          context_suggestions: [{\n            theme: \"daily_life\",\n            description: \"Situation de vie quotidienne\",\n            rationale: \"Contexte générique applicable\",\n            cultural_fit: \"Adapté à tous les niveaux\"\n          }],\n          recommended_context: \"daily_life\"\n        },\n        next_stage: 'scenario',\n        parse_error: 'Échec parsing JSON context: ' + error.message\n      }\n    };\n  }\n});\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1696,
+        2176
+      ],
+      "id": "0a6b769d-5020-43ea-9ab3-782965d8cda7",
+      "name": "parser_context"
+    },
+    {
+      "parameters": {
+        "jsCode": "const previousState = $('Dispatcher').first().json.state;\nconst previousData = $('Dispatcher').first().json;  // ← IMPORTANT: récupérer TOUT\nconst input = $input.first().json;\n\nfunction deepMerge(target, source) {\n  if (!source) return target;\n\n  const output = { ...target };\n\n  Object.keys(source).forEach(key => {\n    if (\n      source[key] &&\n      typeof source[key] === 'object' &&\n      !Array.isArray(source[key]) &&\n      target[key]\n    ) {\n      output[key] = deepMerge(target[key], source[key]);\n    } else {\n      output[key] = source[key];\n    }\n  });\n\n  return output;\n}\n\nconst mergedState = deepMerge(previousState, input.state_update || {});\n\n// ✅ CORRECTION: Retourner state + graphDatabase + graphs\nreturn {\n  state: {\n    ...mergedState,\n    meta: {\n      ...mergedState.meta,\n      stage: input.next_stage || mergedState.meta.stage\n    }\n  },\n  graphDatabase: previousData.graphDatabase || [],  // ← AJOUTÉ\n  graphs: previousData.graphs || []                  // ← AJOUTÉ\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1872,
+        2176
+      ],
+      "id": "f937807b-7acf-45ef-9206-ed83f1c06f58",
+      "name": "Merge Context Update"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "DB_Graphes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral Cloud Chat Model2": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Semantic Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "state": {
+      "main": [
+        [
+          {
+            "node": "clean graphs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "parser": {
+      "main": [
+        [
+          {
+            "node": "Merge Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "clean graphs": {
+      "main": [
+        [
+          {
+            "node": "Candidat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Semantic Agent": {
+      "main": [
+        [
+          {
+            "node": "parser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral Cloud Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Scenario Planner",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scenario Planner": {
+      "main": [
+        [
+          {
+            "node": "parser1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral Cloud Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Arabic Writer",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Arabic Writer": {
+      "main": [
+        [
+          {
+            "node": "parser2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "State Engine": {
+      "main": [
+        [
+          {
+            "node": "Dispatcher",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Update": {
+      "main": [
+        [
+          {
+            "node": "Context Suggester",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Update1": {
+      "main": [
+        [
+          {
+            "node": "Dispatcher",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "parser1": {
+      "main": [
+        [
+          {
+            "node": "Merge Update1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "parser2": {
+      "main": [
+        [
+          {
+            "node": "Merge Update2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Update2": {
+      "main": [
+        [
+          {
+            "node": "Dispatcher",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audit": {
+      "main": [
+        [
+          {
+            "node": "parser3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral Cloud Chat Model3": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Audit",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "parser3": {
+      "main": [
+        [
+          {
+            "node": "Audit Node",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral Cloud Chat Model4": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Explanation",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audit Node": {
+      "main": [
+        [
+          {
+            "node": "Dispatcher",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Explanation": {
+      "main": [
+        [
+          {
+            "node": "parser4",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "parser4": {
+      "main": [
+        [
+          {
+            "node": "Explanation Node",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Explanation Node": {
+      "main": [
+        [
+          {
+            "node": "Dispatcher",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dispatcher": {
+      "main": [
+        [
+          {
+            "node": "Semantic Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Scenario Planner",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Arabic Writer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Audit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Explanation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Final Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DB_Graphes": {
+      "main": [
+        [
+          {
+            "node": "state",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Curriculum JSON": {
+      "main": [
+        [
+          {
+            "node": "GET CONSTRAINTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET CONSTRAINTS": {
+      "main": [
+        [
+          {
+            "node": "SELECTGRAPH",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SELECTGRAPH": {
+      "main": [
+        [
+          {
+            "node": "Backward Generator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Backward Generator": {
+      "main": [
+        [
+          {
+            "node": "Unit Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unit Engine": {
+      "main": [
+        [
+          {
+            "node": "Universal Validator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Universal Validator": {
+      "main": [
+        [
+          {
+            "node": "State Adapter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "State Adapter": {
+      "main": [
+        [
+          {
+            "node": "State Engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Candidat": {
+      "main": [
+        [
+          {
+            "node": "Curriculum JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mistral Cloud Chat Model - Context": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Context Suggester",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Context Suggester": {
+      "main": [
+        [
+          {
+            "node": "parser_context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "parser_context": {
+      "main": [
+        [
+          {
+            "node": "Merge Context Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Context Update": {
+      "main": [
+        [
+          {
+            "node": "Dispatcher",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "e5e7e20e-324c-4594-89aa-c9bfbce7d22c",
+  "meta": {
+    "instanceId": "d46339df43da43fb3fc1f1487d13f7b6ad177bf01370a8d9a73c4a31d799c2fb"
+  },
+  "id": "feBowujc8UnnlhiK",
+  "tags": []
+}
